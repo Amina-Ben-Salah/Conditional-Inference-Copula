@@ -1,0 +1,79 @@
+library(copula)       # For copula modeling
+library(readxl)       # To read Excel files
+library(VC2copula)    # Additional copula tools 
+library(extRemes)     # For extreme value analysis 
+library(ordinal)      # Provides gumbel distribution functions
+library(VineCopula)   # to select the best-fitting bivariate copula family
+
+# Set working directory and load data
+setwd("C:\\Users\\b\\Desktop")
+don <- read_excel("DATA.xlsx")
+
+# Check if necessary columns exist
+if (!all(c("SST", "Chl", "SSP2N") %in% colnames(don))) {
+  stop("Data missing necessary columns: 'SST', 'Chl', or 'SSP2N'")
+}
+
+# Extract and clean historical SST and Chlorophyll-a data
+sst_data <- as.numeric(na.omit(don$SST))  # Remove NAs and convert to numeric
+chl_data <- as.numeric(na.omit(don$Chl))  # Same for Chlorophyll
+
+# Transform data to uniform margins using empirical CDF
+uv <- pobs(cbind(sst_data, chl_data))  # Joint rank transformation
+u <- uv[, 1]  # Transformed SST (uniform [0,1])
+v <- uv[, 2]  # Transformed Chlorophyll (uniform [0,1])
+
+# Select best-fitting copula family
+(selected_copula <- BiCopSelect(u, v, familyset = NA, presel = FALSE))
+copula_comparison <- BiCopEstList(u, v)  # Compare all families
+print(copula_comparison$summary)        # Show summary of fits
+
+# Define the selected copula model
+copula_model <- BiCop(
+  family = selected_copula$family,  # Copula family (e.g., Gaussian)
+  par = selected_copula$par,        # Copula parameter (e.g., -0.85)
+  tau = selected_copula$tau,        # Kendall's tau (dependence measure)
+  check.pars = TRUE                 # Validate parameters
+)
+
+# Fit Gumbel distributions to projected SST
+sst_forecast <- as.numeric(na.omit(don$SSP2N))
+fit_sst <- fevd(sst_forecast, type = "Gumbel")  # Gumbel fit for projected SST
+
+# Simulate new SST values from Gumbel fit
+sst_sim <- rgumbel(
+  n = length(u),                             # Number of simulations
+  loc = fit_sst$results$par["location"],     # Gumbel location parameter
+  scale = fit_sst$results$par["scale"]       # Gumbel scale parameter
+)
+
+# Transform simulated SST to uniform margins
+sst_sim_p <- pobs(matrix(sst_sim, ncol = 1))
+
+# Simulate Chlorophyll-a concentration conditioned on projected SST
+chl_sim_cond <- BiCopCondSim(
+  N = length(u),          # Number of simulations
+  cond.val = sst_sim_p,   # Conditional SST values (uniform)
+  cond.var = 1,           # Condition on the first variable (SST)
+  obj = copula_model      # Copula model to use
+)
+
+fit_chl <- fevd(chl_data, type = "Gumbel")      # Gumbel fit for historical Chlorophyll-a
+
+# Transform uniform Chlorophyll-a simulations back to Gumbel scale
+chl_sim <- qgumbel(
+  chl_sim_cond,                              # Uniform conditional simulations
+  loc = fit_chl$results$par["location"],     # Gumbel location parameter
+  scale = fit_chl$results$par["scale"]       # Gumbel scale parameter
+)
+
+# Store results in a data frame
+sim_results <- data.frame(
+  chl_sim = chl_sim          # Simulated Chlorophyll-a (original scale)
+)
+
+# Print a glimpse of the simulated results
+head(sim_results)
+
+# Save results to CSV for further analysis
+write.csv(sim_results, "simulated_results.csv", row.names = FALSE)
